@@ -69,7 +69,7 @@ class Status:
 
 
 class FishingBot:
-    def __init__(self, cfg: dict, debug: bool = False):
+    def __init__(self, cfg: dict, debug: bool = False, status: Status | None = None):
         self.cfg = cfg
         self.t = cfg["timing"]
         self.capture = ScreenCapture()
@@ -86,7 +86,7 @@ class FishingBot:
         self.cast_point = cfg["cast_point"]
 
         self.start_key, self.pause_key = key_label(cfg, "start"), key_label(cfg, "pause")
-        self.status = Status(self.start_key)
+        self.status = status or Status(self.start_key)   # passed in to keep the counts across a settings reload
         self.running = threading.Event()      # start key sets, pause key clears
         self.quit_event = threading.Event()   # quit key / failsafe
         self._resync = True                   # after any interruption, look before casting

@@ -1,29 +1,59 @@
 """
 Slayers 2 Auto-Fisher - entry point.
 
-    python main.py                      run the bot (calibrates first if needed)
+    python main.py                      open the app (status, Start/Pause, Settings, Setup menu)
     python main.py --calibrate          redo the whole calibration
     python main.py --calibrate-collect  redo only the collect-prompt step
+    python main.py --save-camera        save the current camera view as the one to keep
     python main.py --preview            live detection view, sends no input
-    python main.py --debug              run the bot and save debug images
+    python main.py --debug              open the app and save debug images
     python main.py --simulate           watch the bot play a simulated minigame
 
-Hotkeys while running: F6 start, F7 pause, F8 quit (change them in config.json).
-Emergency stop: shove the mouse into the top-left corner of the screen.
+The app's Setup menu runs the others for you. Hotkeys while running: F6
+start, F7 pause, F8 quit (change them in Settings). Emergency stop: shove the
+mouse into the top-left corner of the screen.
 """
 from __future__ import annotations
 
 import argparse
-import atexit
+import copy
 import ctypes
 import logging
 import signal
 import sys
-import threading
 from logging.handlers import RotatingFileHandler
 
-from config import LOG_DIR, calibration_problem, key_label, load_config
+from config import DEFAULTS, LOG_DIR, calibration_problem, load_config
 from window import make_dpi_aware
+
+_own_console = False        # True when we opened a console window ourselves
+
+
+def ensure_console(title: str) -> None:
+    """
+    Calibration and preview talk to you through a console. When started
+    without one (the shortcut, the .exe, or the app's Setup menu), open one.
+    """
+    global _own_console
+    if sys.stdout is not None:
+        return
+    kernel32 = ctypes.windll.kernel32
+    if not kernel32.AllocConsole():
+        return
+    kernel32.SetConsoleTitleW(title)
+    sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+    sys.stderr = sys.stdout
+    sys.stdin = open("CONIN$", "r", encoding="utf-8")
+    _own_console = True
+
+
+def close_console() -> None:
+    """Keep our own console open until the last message has been read."""
+    if _own_console:
+        try:
+            input("\nPress Enter to close this window.")
+        except (EOFError, KeyboardInterrupt, OSError):
+            pass
 
 
 def setup_logging() -> None:
@@ -35,7 +65,7 @@ def setup_logging() -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.addHandler(file_handler)
-    if sys.stdout is not None:          # no console when started windowless (pythonw)
+    if sys.stdout is not None:          # no console when started windowless (pythonw / the .exe)
         console = logging.StreamHandler(sys.stdout)
         console.setFormatter(logging.Formatter(fmt, "%H:%M:%S"))
         root.addHandler(console)
@@ -64,6 +94,9 @@ def main() -> None:
                         help="save the current Roblox camera view as the one to keep")
     args = parser.parse_args()
 
+    if args.calibrate or args.calibrate_collect or args.preview or args.save_camera:
+        ensure_console("Slayers 2 Auto-Fisher - setup")
+
     # Must happen before any window or screenshot, so pixels line up.
     make_dpi_aware()
     try:
@@ -71,11 +104,19 @@ def main() -> None:
     except OSError:
         pass
     setup_logging()
-    log = logging.getLogger("main")
 
     cfg = load_config()
     from hotkeys import check_hotkeys
-    check_hotkeys(cfg)
+    try:
+        check_hotkeys(cfg)
+    except SystemExit as e:
+        # A hand-edited config.json with a bad key: fall back to the defaults
+        # so the app still opens and the keys can be fixed in Settings.
+        logging.getLogger("main").warning("%s Using the default hotkeys.", e)
+        if sys.stdout is None:
+            show_message("Slayers 2 Auto-Fisher", f"{e}\n\nUsing F6 / F7 / F8 until you change them in Settings.")
+        cfg["hotkeys"] = copy.deepcopy(DEFAULTS["hotkeys"])
+
     if args.simulate:
         from simulator import run_simulation
         run_simulation(cfg, record=args.record, seconds=args.seconds)
@@ -84,67 +125,46 @@ def main() -> None:
         from calibration import save_camera_view
         save_camera_view(cfg)
         return
-    from capture import ScreenCapture
-    monitors = [[m["left"], m["top"], m["width"], m["height"]] for m in ScreenCapture().monitors()[1:]]
-    problem = calibration_problem(cfg, monitors)
-    if problem and sys.stdout is None:
-        # Calibration talks to you through a console, which a windowless start doesn't have.
-        show_message("Slayers 2 Auto-Fisher",
-                     f"{problem}\n\nDouble-click calibrate.bat first, then start the app again.")
-        return
-    if problem and not args.calibrate:
-        print(f"\n{problem} Starting calibration.")
-    if args.calibrate or args.calibrate_collect or problem:
-        from calibration import run_calibration
-        explicit = args.calibrate or args.calibrate_collect
-        cfg = run_calibration(cfg, only_collect=args.calibrate_collect and not problem)
-        if explicit:
-            print("Done. Run 'python main.py' to start fishing.")
-            return
 
+    from ui import App, current_monitors
+    problem = calibration_problem(cfg, current_monitors())
+    if args.calibrate or args.calibrate_collect or (args.preview and problem):
+        from calibration import run_calibration
+        if problem and args.calibrate_collect:
+            print(f"\n{problem} Doing the whole calibration first.")
+        cfg = run_calibration(cfg, only_collect=args.calibrate_collect and not problem)
+        if not args.preview:
+            print("Done. Close this window and press Start in the app.")
+            return
     if args.preview:
         from debugging import run_preview
         run_preview(cfg)
         return
 
-    from bot import FishingBot
-    from hotkeys import start_hotkeys
-    from ui import StatusWindow
-
-    debug = args.debug or cfg["debug"]["enabled"]
-    bot = FishingBot(cfg, debug=debug)
-    atexit.register(bot.inp.release_all, force=True)
-    signal.signal(signal.SIGINT, lambda *_: bot.quit("Ctrl+C"))
-
-    keys = cfg["hotkeys"]
-    listener = start_hotkeys({keys["start"]: bot.start, keys["pause"]: bot.pause,
-                              keys["quit"]: lambda: bot.quit(key_label(cfg, "quit"))})
-    worker = threading.Thread(target=bot.run, name="bot", daemon=True)
-    worker.start()
-    log.info("Ready. Click into Roblox, equip your rod, then press %s to start.", key_label(cfg, "start"))
-
-    StatusWindow(bot, debug).run()      # blocks until quit
-
-    if not bot.quit_event.is_set():
-        bot.quit("status window closed")
-    worker.join(timeout=2)
-    bot.inp.release_all(force=True)
-    listener.stop()
-    s = bot.status.snapshot()
-    log.info("Session over: %d minigames, %d collected, %d without a prompt, %d collect failures, %d recasts",
-             s.minigames, s.catches, s.no_prompt, s.failed, s.recasts)
+    app = App(cfg, debug=args.debug)
+    signal.signal(signal.SIGINT, lambda *_: app.quit("Ctrl+C"))
+    app.run()
 
 
 if __name__ == "__main__":
     try:
         main()
     except SystemExit as e:
-        if sys.stdout is None and isinstance(e.code, str):     # e.g. a broken config.json
-            show_message("Slayers 2 Auto-Fisher", e.code, error=True)
+        if isinstance(e.code, str):
+            if _own_console:
+                print(e.code)
+            elif sys.stdout is None:          # e.g. a broken config.json
+                show_message("Slayers 2 Auto-Fisher", e.code, error=True)
         raise
     except Exception as e:
         logging.getLogger("main").exception("Crashed")
         if sys.stdout is None:          # windowless: nobody would see the traceback otherwise
             show_message("Slayers 2 Auto-Fisher - error",
-                         f"The bot stopped because of an error:\n\n{e}\n\nDetails are in logs\\fishing_bot.log", error=True)
+                         f"The program stopped because of an error:\n\n{e}\n\nDetails are in logs\\fishing_bot.log",
+                         error=True)
+        elif _own_console:
+            import traceback
+            traceback.print_exc()
         raise
+    finally:
+        close_console()

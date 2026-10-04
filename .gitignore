@@ -8,3 +8,5 @@ debug/
 # Your own calibration: only fits your screen, so it is not shared.
 config.json
 templates/
+build/
+dist/

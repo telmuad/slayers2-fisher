@@ -1,0 +1,3 @@
+# Only needed to build the .exe (build.bat installs these).
+pyinstaller>=6.10
+icoextract>=0.1.4

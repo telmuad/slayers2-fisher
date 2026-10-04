@@ -26,7 +26,7 @@ echo Installing the requirements ...
 ".venv\Scripts\python.exe" make_shortcut.py || goto :failed
 
 echo.
-echo Setup done. Next: double-click calibrate.bat (see README, section 3).
+echo Setup done. Start the app with the "Slayers 2 Fisher" shortcut and click Calibrate.
 pause
 exit /b 0
 

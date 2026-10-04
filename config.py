@@ -11,11 +11,17 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import sys
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-APP_DIR = Path(__file__).resolve().parent
+VERSION = "1.1.0"
+
+# Settings, logs and calibration images live next to the program: next to
+# the .exe when packaged with PyInstaller, otherwise next to this file.
+APP_DIR = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+           else Path(__file__).resolve().parent)
 CONFIG_PATH = APP_DIR / "config.json"
 TEMPLATE_DIR = APP_DIR / "templates"
 DEBUG_DIR = APP_DIR / "debug"
