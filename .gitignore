@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+logs/
+debug/
+*.lnk
+
+# Your own calibration: only fits your screen, so it is not shared.
+config.json
+templates/
