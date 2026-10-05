@@ -16,7 +16,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-VERSION = "1.1.0"
+VERSION = "1.3.0"
 
 # Settings, logs and calibration images live next to the program: next to
 # the .exe when packaged with PyInstaller, otherwise next to this file.
@@ -28,6 +28,8 @@ DEBUG_DIR = APP_DIR / "debug"
 LOG_DIR = APP_DIR / "logs"
 
 DEFAULTS: dict = {
+    "mode": "fishing",          # "fishing", or "quests" (Angler Runo's crate quest, see quest.py)
+
     # ---- Filled in by calibration (absolute screen pixels) -----------------
     "calibrated": False,
     "monitor": None,            # [left, top, width, height] of the monitor Roblox was on
@@ -144,6 +146,33 @@ DEFAULTS: dict = {
         "start": "f6",
         "pause": "f7",
         "quit": "f8"
+    },
+
+    # ---- Quest mode (quest.py) -------------------------------------------------
+    "quests": {
+        "level": 60,                  # 45 = "Ill fill your crates", 60 = "Ill land the good catch"
+        "cooldown_s": 12,             # wait after handing in (the game's cooldown is 10 s)
+        "load_hold_s": 2.0,           # how long to hold T on the crate
+        "npc_name": "Angler Runo",
+        "crate_name": "Fish Crate",
+        "max_dialogue_clicks": 15     # give up on a conversation after this many clicks
+    },
+
+    # ---- Discord notifications (Settings > Notifications) ---------------------
+    "notifications": {
+        "webhook_url": "",            # Discord channel > Edit > Integrations > Webhooks > Copy URL
+        "username": "Slayers 2 Fisher",
+        "ping_user_id": "",           # your Discord user ID, to be @mentioned on alerts
+        "on_catch": True,             # a message for every collected catch
+        "on_quest": True,             # a message for every finished quest
+        "catch_picture": True,        # ... with a close-up of what was caught
+        "on_no_prompt": False,        # also when a minigame ends without a Collect prompt
+        "on_start_stop": True,        # started / paused / stopped
+        "summary_every_min": 30,      # status update while running (0 = off)
+        "alert_idle_min": 10,         # alert: nothing hooked for this long (0 = off)
+        "alert_unfocused_min": 5,     # alert: Roblox not focused for this long (0 = off)
+        "alert_recasts": 5,           # alert: this many casts in a row without a bite (0 = off)
+        "screenshots": True           # attach a screenshot to status updates and alerts
     },
 
     # ---- Roblox window -------------------------------------------------------

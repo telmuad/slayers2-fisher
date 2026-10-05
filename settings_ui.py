@@ -9,6 +9,7 @@ positions, camera measurements) aren't listed: use the Setup menu for those.
 from __future__ import annotations
 
 import copy
+import threading
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
@@ -16,6 +17,7 @@ from typing import Callable
 
 from config import DEFAULTS
 from hotkeys import check_hotkeys
+from notifier import Message, post, valid_webhook
 
 BG, PANEL, FG, MUTED, ACCENT = "#1b1e24", "#242831", "#e8eaed", "#9aa4b2", "#4aa3ff"
 
@@ -25,18 +27,28 @@ class Field:
     path: tuple[str, ...]       # where it lives in the config, e.g. ("timing", "bite_timeout_s")
     label: str
     help: str = ""
-    kind: str = "float"         # float, int, bool, str, list, key, file
+    kind: str = "float"         # float, int, bool, str, list, key, file, webhook, choice
     lo: float | None = None
     hi: float | None = None
+    choices: tuple = ()         # for "choice": ((value, label), ...)
+
+    def label_for(self, value) -> str:
+        return next((lab for v, lab in self.choices if v == value), str(value))
 
 
-def F(path: str, label: str, help: str = "", kind: str = "float", lo=None, hi=None) -> Field:
-    return Field(tuple(path.split(".")), label, help, kind, lo, hi)
+def F(path: str, label: str, help: str = "", kind: str = "float", lo=None, hi=None, choices=()) -> Field:
+    return Field(tuple(path.split(".")), label, help, kind, lo, hi, tuple(choices))
 
 
 # (tab, [(section, [fields])])
 TABS: list[tuple[str, list[tuple[str, list[Field]]]]] = [
     ("General", [
+        ("Mode", [
+            F("mode", "What the bot does",
+              "Fishing: casts, plays the minigame and collects. Quests: does Angler Runo's crate "
+              "quest with the fish you have. You can also switch in the main window.", "choice",
+              choices=(("fishing", "Fishing"), ("quests", "Quests"))),
+        ]),
         ("Hotkeys", [
             F("hotkeys.start", "Start / resume", "Also takes the snapshots during calibration.", "key"),
             F("hotkeys.pause", "Pause", "Lets go of everything. Also skips a calibration step.", "key"),
@@ -116,6 +128,52 @@ TABS: list[tuple[str, list[tuple[str, list[Field]]]]] = [
             F("controller.box_lost_hold_s", "Coast when the box is lost (s)", "", "float", 0, 5),
         ]),
     ]),
+    ("Quests", [
+        ("Angler Runo's crate quest", [
+            F("quests.level", "Which quest", "", "choice",
+              choices=((45, "Lv 45: Ill fill your crates"), (60, "Lv 60: Ill land the good catch"))),
+            F("quests.cooldown_s", "Wait after handing in (s)",
+              "The game's cooldown between quests is 10 s.", "float", 0, 600),
+            F("quests.load_hold_s", "Hold T on the crate for (s)",
+              "Long enough for all your fish to go in.", "float", 0.3, 15),
+        ]),
+        ("Names on screen (only change these if the game renames them)", [
+            F("quests.npc_name", "Quest giver", "", "str"),
+            F("quests.crate_name", "Crate", "", "str"),
+            F("quests.max_dialogue_clicks", "Give up on a conversation after (clicks)", "", "int", 3, 100),
+        ]),
+    ]),
+    ("Notifications", [
+        ("Discord webhook", [
+            F("notifications.webhook_url", "Webhook URL",
+              "In Discord: open a channel's settings > Integrations > Webhooks > New Webhook > "
+              "Copy Webhook URL, and paste it here. Leave empty to turn notifications off.", "webhook"),
+            F("notifications.username", "Name shown in Discord", "", "str"),
+            F("notifications.ping_user_id", "Your Discord user ID (optional)",
+              "To be @mentioned on alerts, so your phone buzzes. In Discord: Settings > Advanced > "
+              "Developer Mode on, then right-click your name > Copy User ID.", "str"),
+        ]),
+        ("Messages", [
+            F("notifications.on_catch", "Every catch", "Each catch collected with T.", "bool"),
+            F("notifications.on_quest", "Every finished quest",
+              "Running out of fish for a quest always sends an alert.", "bool"),
+            F("notifications.catch_picture", "With a picture of the catch",
+              "A close-up of the item and its Collect prompt.", "bool"),
+            F("notifications.on_no_prompt", "Minigames without a Collect prompt",
+              "Caught straight into your inventory, or the fish escaped.", "bool"),
+            F("notifications.on_start_stop", "Started / paused / stopped", "", "bool"),
+            F("notifications.summary_every_min", "Status update every (minutes)",
+              "Counts and catch rate while the bot runs. 0 = off.", "int", 0, 1440),
+            F("notifications.screenshots", "Add a screenshot to status updates and alerts",
+              "A picture of the Roblox screen, so you can see what's going on.", "bool"),
+        ]),
+        ("Alerts (with a ping, if your user ID is set). 0 = off", [
+            F("notifications.alert_idle_min", "Nothing hooked for (minutes)", "", "int", 0, 1440),
+            F("notifications.alert_unfocused_min", "Roblox not focused for (minutes)",
+              "For example if Roblox crashed, disconnected or another window popped up.", "int", 0, 1440),
+            F("notifications.alert_recasts", "Casts in a row without a bite", "", "int", 0, 1000),
+        ]),
+    ]),
     ("Detection", [
         ("Collect prompt", [
             F("detection.require_collect_word", "Only press T after finding the word \"Collect\"",
@@ -171,6 +229,12 @@ TABS: list[tuple[str, list[tuple[str, list[Field]]]]] = [
 
 # Shown at the top of a tab
 TAB_NOTES = {
+    "Quests": "Stand between Angler Runo and his crate, close enough that both his Chat prompt "
+              "and the crate's Load prompt can show up, and keep the quest list on the left of the "
+              "screen visible. Then choose Quests mode and press start. When you run out of fish, "
+              "it sends a Discord alert and pauses.",
+    "Notifications": "Get Discord messages, for example on your phone, to check the bot is "
+                     "working while you're away. Errors always send an alert.",
     "Minigame": "How the bot steers the white box. The defaults were measured in the real game; "
                 "try changes in the Simulator (Setup menu) first, one value at a time.",
     "Detection": "How the bot recognises things on screen. Only change these if Preview detection "
@@ -300,6 +364,13 @@ class SettingsWindow:
         s.configure("TCheckbutton", background=PANEL, foreground=FG)
         s.map("TCheckbutton", background=[("active", PANEL)])
         s.configure("TEntry", foreground=FG, insertcolor=FG)
+        s.configure("TCombobox", fieldbackground="#2f3440", background="#2f3440", foreground=FG,
+                    arrowcolor=FG, selectbackground="#2f3440", selectforeground=FG)
+        s.map("TCombobox", fieldbackground=[("readonly", "#2f3440")], foreground=[("readonly", FG)],
+              selectbackground=[("readonly", "#2f3440")], selectforeground=[("readonly", FG)])
+        self.win.option_add("*TCombobox*Listbox.background", "#2f3440")
+        self.win.option_add("*TCombobox*Listbox.foreground", FG)
+        self.win.option_add("*TCombobox*Listbox.selectBackground", "#2d6cdf")
         s.configure("Vertical.TScrollbar", background="#3a404c", troughcolor=PANEL,
                     arrowcolor=MUTED, bordercolor=PANEL)
         s.map("Vertical.TScrollbar", background=[("active", "#4a5160")])
@@ -320,6 +391,18 @@ class SettingsWindow:
                                  command=lambda p=f.path: self._start_capture(p))
                 btn.grid(row=row, column=1, sticky="w", padx=(0, 12), pady=(4, 0))
                 self.key_buttons[f.path] = btn
+            elif f.kind == "choice":
+                var = tk.StringVar(value=f.label_for(value))
+                ttk.Combobox(parent, textvariable=var, values=[lab for _, lab in f.choices],
+                             state="readonly", width=32).grid(row=row, column=1, sticky="w",
+                                                              padx=(0, 12), pady=(4, 0))
+            elif f.kind == "webhook":
+                var = tk.StringVar(value=str(value))
+                box = ttk.Frame(parent, style="Panel.TFrame")
+                ttk.Entry(box, textvariable=var, width=28, show="•").pack(side="left")
+                self.test_button = ttk.Button(box, text="Test", command=self._test_webhook)
+                self.test_button.pack(side="left", padx=4)
+                box.grid(row=row, column=1, sticky="w", padx=(0, 12), pady=(4, 0))
             elif f.kind == "file":
                 var = tk.StringVar(value=str(value))
                 box = ttk.Frame(parent, style="Panel.TFrame")
@@ -374,19 +457,62 @@ class SettingsWindow:
         self._stop_capture()
         return "break"
 
+    # -- webhook test ---------------------------------------------------------------
+    def _test_webhook(self):
+        n = {k: self.vars[("notifications", k)].get() for k in ("webhook_url", "username", "ping_user_id")}
+        url = n["webhook_url"].strip()
+        if not valid_webhook(url):
+            messagebox.showerror("Webhook", "Paste a Discord webhook URL first "
+                                 "(https://discord.com/api/webhooks/...).", parent=self.win)
+            return
+        ping = n["ping_user_id"].strip()
+        self.test_button.configure(text="Sending...", state="disabled")
+
+        def send():
+            try:
+                post(url, Message("Test message", "Notifications from the Slayers 2 Auto-Fisher work."
+                                  + (" You'll be pinged on alerts." if ping else ""), ping=bool(ping)),
+                     n["username"].strip(), ping)
+                result = None
+            except Exception as e:      # shown to the user, never raised
+                result = getattr(e, "reason", None) or str(e)
+            self.win.after(0, lambda: self._test_done(result))
+        threading.Thread(target=send, daemon=True).start()
+
+    def _test_done(self, error):
+        if not self.win.winfo_exists():
+            return
+        self.test_button.configure(text="Test", state="normal")
+        if error is None:
+            messagebox.showinfo("Webhook", "Sent! Check your Discord channel.", parent=self.win)
+        else:
+            messagebox.showerror("Webhook", f"Couldn't send: {error}\n\nCheck the URL, and that the "
+                                 "webhook wasn't deleted in Discord.", parent=self.win)
+
     # -- actions --------------------------------------------------------------------
     def _parse(self, f: Field, var: tk.Variable):
         """The value as it goes into config.json, or raise ValueError with a message."""
         raw = var.get()
         if f.kind == "bool":
             return bool(raw)
+        if f.kind == "choice":
+            for v, lab in f.choices:
+                if lab == raw:
+                    return v
+            raise ValueError("pick one of the choices")
         if f.kind == "list":
             items = [x.strip() for x in str(raw).split(",") if x.strip()]
             if not items:
                 raise ValueError("needs at least one name")
             return items
-        if f.kind in ("str", "key", "file"):
-            return str(raw).strip()
+        if f.kind in ("str", "key", "file", "webhook"):
+            text = str(raw).strip()
+            if f.kind == "webhook" and text and not valid_webhook(text):
+                raise ValueError("paste a Discord webhook URL (https://discord.com/api/webhooks/...), "
+                                 "or leave it empty")
+            if f.path == ("notifications", "ping_user_id") and text and not (text.isdigit() and 15 <= len(text) <= 21):
+                raise ValueError("a Discord user ID is a long number, like 123456789012345678")
+            return text
         try:
             number = float(str(raw).strip().replace(",", "."))
         except ValueError:
@@ -448,6 +574,8 @@ class SettingsWindow:
                 var = self.vars[f.path]
                 if f.kind == "list":
                     var.set(", ".join(value))
+                elif f.kind == "choice":
+                    var.set(f.label_for(value))
                 elif f.kind == "key":
                     var.set(value)
                     self.key_buttons[f.path].configure(text=key_text(value))

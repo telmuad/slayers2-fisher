@@ -46,7 +46,8 @@ The small window stays on top and shows:
 
 Its buttons:
 - **Start / Pause:** the same as the start and pause hotkeys. After clicking Start, click into Roblox; the bot only acts while Roblox is focused. On first use this button says **Calibrate** instead.
-- **Settings:** every setting, in tabs (General, Fishing, Minigame, Detection). Each one has a short explanation, and wrong values are refused with a message. **Reset this tab to defaults** undoes your changes on that tab. The bot is paused while Settings is open and uses the new values as soon as you click Save.
+- **Settings:** every setting, in tabs (General, Fishing, Minigame, Quests, Notifications, Detection). Each one has a short explanation, and wrong values are refused with a message. **Reset this tab to defaults** undoes your changes on that tab. The bot is paused while Settings is open and uses the new values as soon as you click Save.
+- **Fishing / Quests:** what the bot does (see *Quest mode* below).
 - **Setup:** calibration, saving the camera view, preview, the simulator, and the log and debug image folders.
 
 | Hotkey (default) | Action |
@@ -110,6 +111,58 @@ When the console says it's done, press Enter to close it. The app picks up the n
 After each minigame the log says how much of the time the box was in the zone, e.g. "box in the zone 97% of the time". It's the easiest way to see how well it's playing. Open it with **Setup → Open the log folder**.
 
 If you alt-tab away, the bot pauses by itself and resumes when Roblox is focused again. Clicking the app window also takes focus away from Roblox, so avoid that while fishing.
+
+---
+
+## Quest mode: Angler Runo's crate quest
+
+Instead of fishing, the bot can do Angler Runo's crate quest over and over with the fish you've caught:
+
+1. Holds T on **Angler Runo / Chat** and clicks through his lines. For the Lv 60 quest it picks **Anything bigger?** first.
+2. Accepts the quest you chose: **Ill fill your crates (Lv 45)** or **Ill land the good catch (Lv 60)**.
+3. Holds T on **Fish Crate / Load** to put your fish in.
+4. Talks to him again, clicks **The crate is loaded**, and clicks through his lines.
+5. Waits out the 10 s quest cooldown and starts over.
+
+**To use it:**
+- Stand between Angler Runo and his crate, close enough that both his Chat prompt and the crate's Load prompt can show up. The bot never moves your character.
+- Keep the quest list on the left of the screen visible. That's how the bot sees which fish are still missing.
+- Switch the main window from **Fishing** to **Quests** (the button next to Setup), then press **F6** in Roblox.
+- Choose the quest under **Settings → Quests**. Lv 60 is the default.
+
+When the crate can't be filled because you're **out of fish**, it sends a Discord alert listing what's still missing (e.g. "Clown Fish: 0/1") and pauses. Every finished quest also sends a Discord message if notifications are set up (see below).
+
+Quest mode reads the dialogue and prompts with the text recognition built into Windows 10/11, so it needs no calibration and works at any screen size. It only presses T when the prompt says **Chat** under Angler Runo's name or **Load** under the crate's name. It only clicks dialogue that is on screen. If Windows says text recognition isn't available, add English under *Windows Settings → Time & language → Language*.
+
+---
+
+## Discord notifications: check on it while you're away
+
+The app can post to a Discord channel, so you can see on your phone that it's still fishing.
+
+1. In Discord, pick a channel (a private server just for you works well). Open the channel's settings, choose **Integrations → Webhooks → New Webhook**, then **Copy Webhook URL**.
+2. In the app, open **Settings → Notifications**, paste the URL and click **Test**. A test message should appear in the channel.
+3. Optional: to be **@mentioned on alerts**, so your phone buzzes, paste your Discord user ID. To find it, turn on Developer Mode under Discord's *Settings → Advanced*, then right-click your name and choose *Copy User ID*.
+4. Click **Save**. The app window shows "Discord on".
+
+What it sends (each can be switched off):
+
+| Message | Default |
+|---|---|
+| **Every catch**, with a close-up of the item and its prompt, and how well it played the minigame | on |
+| Started / paused / stopped, with the reason (e.g. the emergency stop) | on |
+| **Status update** with counts, fish hooked per hour, run time and a screenshot | every 30 min |
+| Minigames without a Collect prompt | off |
+
+**Alerts** (with the @mention) when something looks wrong:
+- nothing hooked for **10 minutes** while running
+- Roblox not the focused window for **5 minutes**, for example if it crashed or disconnected
+- **5 casts in a row** without a bite: the cast may be missing the water, or your character moved
+- the bot hit an error (always on)
+
+Each alert is sent once until things recover, with a screenshot so you can see what's wrong. Messages are sent in the background and never slow the bot down.
+
+> **Keep your webhook URL private.** Anyone who has it can post in that channel. It's saved only in `config.json` on your PC, which is never uploaded or included in builds. If it leaks, delete the webhook in Discord and make a new one. Screenshots show the screen Roblox is on, so they go wherever that channel's messages go.
 
 ---
 
@@ -254,6 +307,9 @@ All settings are saved in `config.json` next to the app. You never need to edit 
 | `main.py` | Entry point and command-line options |
 | `ui.py` | The app window: status, Start/Pause, Setup menu |
 | `settings_ui.py` | The Settings window (one line per setting) |
+| `notifier.py` | Discord webhook notifications and alerts |
+| `quest.py` | Quest mode (Angler Runo's crate quest) |
+| `ocr.py` | Windows' built-in text recognition |
 | `bot.py` | The fishing loop (state machine) |
 | `detection.py` | Finds the bar, zone, white box and collect prompt |
 | `controller.py` | Minigame hold/release controller |

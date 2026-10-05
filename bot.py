@@ -11,6 +11,7 @@ import logging
 import random
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 
 from camera import CameraKeeper
@@ -20,6 +21,8 @@ from controller import MinigameController
 from debugging import DebugSaver, annotate_minigame, annotate_prompt
 from detection import (BarDetector, BarGeometry, MinigameReading, PromptDetector, PromptMatch,
                        nearest_water)
+from notifier import Notifier
+from quest import QuestRunner
 from win_input import InputController
 from window import RobloxWindow, cursor_in_failsafe_corner
 
@@ -40,6 +43,7 @@ class StatusSnapshot:
     failed: int       # a Collect prompt that didn't go away after holding T
     recasts: int
     fps: float
+    quests: int = 0   # quests handed in (quest mode)
 
 
 class Status:
@@ -49,7 +53,7 @@ class Status:
         self._lock = threading.Lock()
         self.state = "Stopped"
         self.detail = f"Press {start_key} in Roblox to start"
-        self.minigames = self.catches = self.no_prompt = self.failed = self.recasts = 0
+        self.minigames = self.catches = self.no_prompt = self.failed = self.recasts = self.quests = 0
         self.fps = 0.0
 
     def set(self, state: str, detail: str = "") -> None:
@@ -65,11 +69,12 @@ class Status:
     def snapshot(self) -> StatusSnapshot:
         with self._lock:
             return StatusSnapshot(self.state, self.detail, self.minigames, self.catches,
-                                  self.no_prompt, self.failed, self.recasts, self.fps)
+                                  self.no_prompt, self.failed, self.recasts, self.fps, self.quests)
 
 
 class FishingBot:
-    def __init__(self, cfg: dict, debug: bool = False, status: Status | None = None):
+    def __init__(self, cfg: dict, debug: bool = False, status: Status | None = None,
+                 notifier: Notifier | None = None):
         self.cfg = cfg
         self.t = cfg["timing"]
         self.capture = ScreenCapture()
@@ -93,6 +98,14 @@ class FishingBot:
         self.camera = CameraKeeper(cfg, self)
         self._camera_pending = False          # start sets: check the camera once, before the next cast
         self._fps_last = 0.0
+        self.unfocused_since: float | None = None   # while running but Roblox isn't focused
+        self._no_bites = 0                    # casts in a row without a bite
+        self.last_in_zone: float | None = None  # % of the last minigame the box was in the zone
+        self.quests = QuestRunner(self)     # quest mode (reads the screen with Windows OCR)
+        self.notify = notifier or Notifier(cfg)
+        self.notify.bot = self
+        if self.notify.screenshot is None:
+            self.notify.screenshot = lambda: self.capture.grab(list(self.quests.mon))
 
         log.info("Bot ready. Bar region %s, cast point %s, collect region %s, prompt detection: %s",
                  self.bar_region, self.cast_point, self.collect_region,
@@ -105,18 +118,26 @@ class FishingBot:
         if not self.running.is_set():
             log.info("Started (%s)", self.start_key)
             self._camera_pending = True
+            self._no_bites = 0
+            self.notify.started()
         self.running.set()
 
-    def pause(self) -> None:
+    def pause(self, reason: str | None = None, notify: bool = True) -> None:
         if self.running.is_set():
-            log.info("Paused (%s)", self.pause_key)
+            log.info("Paused (%s)", reason or self.pause_key)
+            if notify:
+                self.notify.paused(reason or self.pause_key)
         self.running.clear()
         self.inp.release_all()
 
-    def quit(self, reason: str = "quit key") -> None:
+    def quit(self, reason: str = "quit key", notify: bool = True) -> None:
+        """``notify=False`` when the app is only rebuilding the bot (new settings)."""
         log.info("Quit requested (%s)", reason)
+        first = not self.quit_event.is_set()
         self.quit_event.set()
         self.running.clear()
+        if notify and first:
+            self.notify.stopped(reason)
         self.inp.release_all(force=True)
 
     # ------------------------------------------------------------------
@@ -126,8 +147,9 @@ class FishingBot:
         while not self.quit_event.is_set():
             try:
                 if not self.running.is_set():
+                    self.unfocused_since = None
                     # Keep "Stopped" (never started) and error messages visible.
-                    if self.status.state != "Stopped" and not self.status.detail.startswith("Error"):
+                    if self.status.state != "Stopped" and not self.status.detail.startswith(("Error", "Out of fish")):
                         self.status.set("Paused", f"Press {self.start_key} to resume")
                     time.sleep(0.05)
                     continue
@@ -135,11 +157,14 @@ class FishingBot:
                     self.quit("mouse in top-left corner")
                     break
                 if not self.window.is_focused():
+                    if self.unfocused_since is None:
+                        self.unfocused_since = time.time()
                     self.status.set("Paused", "Roblox is not the focused window")
                     self.inp.release_all()
                     self._resync = True
                     time.sleep(0.1)
                     continue
+                self.unfocused_since = None
                 self._step()
             except Interrupted as e:
                 self.inp.release_all()
@@ -147,6 +172,7 @@ class FishingBot:
                 log.info("Interrupted: %s", e)
             except Exception:
                 log.exception("Unexpected error - pausing")
+                self.notify.error(traceback.format_exc(limit=3))
                 self.inp.release_all()
                 self.running.clear()
                 self.status.set("Paused", "Error! See logs/fishing_bot.log")
@@ -154,6 +180,9 @@ class FishingBot:
         self.status.set("Stopped", "Quit")
 
     def _step(self) -> None:
+        if self.cfg.get("mode") == "quests":
+            self.quests.step()
+            return
         if self._resync:
             # Just started or resumed: pick up wherever the game is.
             self._resync = False
@@ -175,7 +204,10 @@ class FishingBot:
         bar = self._wait_for_bite()
         if bar is None:
             self.status.add("recasts")
+            self._no_bites += 1
+            self.notify.no_bite(self._no_bites)
             return
+        self._no_bites = 0
         self._play_minigame(bar)
         self._after_minigame()
 
@@ -264,6 +296,8 @@ class FishingBot:
             bar = BarGeometry.from_dict(self.cfg["bar_expected"])
         self.status.set("Minigame")
         self.status.add("minigames")
+        self.notify.hooked()
+        self.last_in_zone = None
         log.info("Minigame started (bar x %d-%d, y %d-%d)", bar.x0, bar.x1, bar.top, bar.bottom)
         self.ctrl.reset()
         grace = self.t["minigame_end_grace_s"]
@@ -299,6 +333,8 @@ class FishingBot:
                 self._pace(self.t["control_fps"], t0)
         finally:
             self.inp.mouse_up()
+        if measured:
+            self.last_in_zone = 100 * inside / measured
         log.info("Minigame ended after %.1fs (%d frames, box in the zone %.0f%% of the time, "
                  "learned braking %.2f)", time.perf_counter() - start, frame_no,
                  100 * inside / max(1, measured), self.ctrl.braking)
@@ -309,7 +345,9 @@ class FishingBot:
         if match is None:
             self.status.add("no_prompt")
             log.info("No collect prompt - the catch went straight to the inventory, or the fish escaped")
+            self.notify.no_prompt(self.last_in_zone)
             return False
+        picture = self._catch_picture(match) if self.notify.enabled else None
 
         self.status.set("Collecting", "holding T")
         for attempt in (1, 2):
@@ -317,6 +355,7 @@ class FishingBot:
             if gone:
                 self.status.add("catches")
                 log.info("Collected! (%s match %.2f)", match.method, match.score)
+                self.notify.caught(picture, self.last_in_zone)
                 # A click during the catch animation is ignored, so let it finish.
                 self._sleep(self.t["after_collect_delay_s"])
                 return True
@@ -354,6 +393,17 @@ class FishingBot:
     # ------------------------------------------------------------------
     # Detection helpers
     # ------------------------------------------------------------------
+    def _catch_picture(self, match: PromptMatch):
+        """A close-up of the caught item and its prompt, for the catch notification."""
+        try:
+            img = self.capture.grab(self.collect_region)
+            r, h = match.rect, max(8, match.rect.h)
+            x0, y0 = max(0, int(r.x - 8 * h)), max(0, int(r.y - 12 * h))
+            x1, y1 = min(img.shape[1], int(r.x + r.w + 14 * h)), min(img.shape[0], int(r.y + r.h + 3 * h))
+            return img[y0:y1, x0:x1].copy() if x1 > x0 and y1 > y0 else None
+        except Exception:
+            return None
+
     def _read_bar(self) -> MinigameReading:
         return self.bar_det.analyze(self.capture.grab(self.bar_region))
 

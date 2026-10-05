@@ -26,6 +26,7 @@ from capture import ScreenCapture
 from config import (APP_DIR, DEBUG_DIR, LOG_DIR, VERSION, calibration_problem, key_label, load_config,
                     save_config)
 from hotkeys import start_hotkeys
+from notifier import Notifier
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +119,16 @@ class App:
         self.setup_button.configure(menu=menu)
         self.setup_button.pack(side="left", padx=2)
 
+        # Fishing or quest mode, switchable here or in Settings
+        self.mode_var = tk.StringVar(value=self.cfg.get("mode", "fishing"))
+        self.mode_button = tk.Menubutton(bar, width=8, **style)
+        mode_menu = tk.Menu(self.mode_button, tearoff=False)
+        for value, label in (("fishing", "Fishing"), ("quests", "Quests")):
+            mode_menu.add_radiobutton(label=label, value=value, variable=self.mode_var,
+                                      command=self._mode_changed)
+        self.mode_button.configure(menu=mode_menu)
+        self.mode_button.pack(side="left", padx=2)
+
         tk.Label(self.root, textvariable=self.hint_var, bg=BG, fg=MUTED,
                  font=("Segoe UI", 8)).grid(row=5, column=0, columnspan=3, pady=(6, 8), **pad)
 
@@ -126,20 +137,35 @@ class App:
         w = max(self.root.winfo_reqwidth(), 300)
         self.root.geometry(f"+{self.root.winfo_screenwidth() - w - 20}+40")
 
+    def _mode_changed(self):
+        mode = self.mode_var.get()
+        if mode == self.cfg.get("mode"):
+            return
+        self._suspend()
+        cfg = copy.deepcopy(self.cfg)
+        cfg["mode"] = mode
+        save_config(cfg)
+        log.info("Mode: %s", mode)
+        self._resume(cfg)
+
     def _open_folder(self, path):
         path.mkdir(exist_ok=True)
         os.startfile(path)
 
     # -- bot lifecycle ----------------------------------------------------------------
     def _start_bot(self):
-        self.problem = calibration_problem(self.cfg, current_monitors())
+        self.mode_var.set(self.cfg.get("mode", "fishing"))
+        # Quest mode reads everything by its text, so it doesn't need the fishing calibration.
+        self.problem = (None if self.cfg.get("mode") == "quests"
+                        else calibration_problem(self.cfg, current_monitors()))
         self.hint_var.set("{} start   {} pause   {} quit".format(
             *(key_label(self.cfg, a) for a in ("start", "pause", "quit")))
-            + ("   [saving debug images]" if self._debug else ""))
+            + ("   Discord on" if Notifier.configured(self.cfg) else "")
+            + ("   [debug images]" if self._debug else ""))
         if self.problem:
             log.info("Not starting the bot: %s", self.problem)
             return
-        self.bot = FishingBot(self.cfg, debug=self._debug, status=self.status)
+        self.bot = FishingBot(self.cfg, debug=self._debug, status=self.status, notifier=Notifier(self.cfg))
         self.status = self.bot.status
         self.status.set("Stopped", f"Press {key_label(self.cfg, 'start')} in Roblox to start")
         self.worker = threading.Thread(target=self.bot.run, name="bot", daemon=True)
@@ -154,10 +180,11 @@ class App:
         bot, self.bot = self.bot, None
         if bot is None:
             return
-        bot.quit("reloading")
+        bot.quit("reloading", notify=False)
         if self.worker:
             self.worker.join(timeout=3)
         bot.inp.release_all(force=True)
+        bot.notify.close(timeout=5 if self.quitting.is_set() else 1)
 
     def _start_hotkeys(self):
         if self.listener:
@@ -181,7 +208,7 @@ class App:
             self.run_tool("Calibrating", "--calibrate")
         elif self.bot is not None:
             if self.bot.running.is_set():
-                self.bot.pause()
+                self.bot.pause("Pause button")
             else:
                 self.bot.start()    # it waits until you click into Roblox
 
@@ -270,11 +297,17 @@ class App:
         self.state_label.configure(fg=STATE_COLORS.get(state, FG))
         self.detail_var.set(detail)
 
+        quests = self.cfg.get("mode") == "quests"
+        self.mode_button.configure(text=("Quests" if quests else "Fishing") + " ▾",
+                                   state="disabled" if busy_tool or self.settings is not None else "normal")
         if self.status is not None:
             s = self.status.snapshot()
-            lines = [f"Minigames: {s.minigames:<4} Collected: {s.catches:<4}",
-                     f"No prompt: {s.no_prompt:<4} Recasts:   {s.recasts:<4}"]
-            if s.failed:
+            if quests:
+                lines = [f"Quests done: {s.quests:<4}", f"Lv {self.cfg['quests']['level']} crate quest"]
+            else:
+                lines = [f"Minigames: {s.minigames:<4} Collected: {s.catches:<4}",
+                         f"No prompt: {s.no_prompt:<4} Recasts:   {s.recasts:<4}"]
+            if s.failed and not quests:
                 lines.append(f"Collect failed: {s.failed}")
             self.stats_var.set("\n".join(lines))
             busy = s.state in ("Waiting", "Minigame") and self.bot is not None

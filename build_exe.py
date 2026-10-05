@@ -65,6 +65,8 @@ def build() -> Path:
         "--hidden-import", "pynput.keyboard._win32",
         "--hidden-import", "pynput.mouse._win32",
         "--exclude-module", "pytesseract",
+        # Windows text recognition (quest mode): loaded inside functions
+        "--collect-submodules", "winrt",
     ])
     return DIST / NAME
 

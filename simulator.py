@@ -34,6 +34,7 @@ import bot as bot_module
 from bot import FishingBot
 from debugging import annotate_minigame, annotate_prompt
 from detection import BarDetector, PromptDetector
+from notifier import Notifier
 from window import primary_monitor_rect
 
 log = logging.getLogger("game")
@@ -436,7 +437,10 @@ class Simulator:
 
         # The real bot, with the screen and input swapped for the simulation.
         bot_module.cursor_in_failsafe_corner = lambda: False
-        self.bot = FishingBot(cfg, debug=False)
+        # Never send Discord messages about simulated catches.
+        quiet = copy.deepcopy(cfg)
+        quiet["notifications"]["webhook_url"] = ""
+        self.bot = FishingBot(cfg, debug=False, notifier=Notifier(quiet))
         self.bot.capture = SimCapture(self.game)
         self.bot.inp = SimInput(self.game)
         self.bot.window.is_focused = lambda: True
